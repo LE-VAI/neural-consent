@@ -6,6 +6,8 @@
 npm install neural-consent
 ```
 
+**[Try the live consent demo →](https://le-vai.github.io/neural-consent/demo/)**
+
 ```js
 import { ConsentManager, PURPOSES, DISCLAIMER } from 'neural-consent';
 
