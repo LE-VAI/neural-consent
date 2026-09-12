@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Consent for a neural-signal tool — what you are agreeing to</title>
+<style>
+  :root {
+    --bg: #0b0c0f;
+    --surface: #181a1e;
+    --border: #2a2d33;
+    --text: #f5f5f7;
+    --dim: #9a9aa5;
+    --amber: #ffc400;
+    --ok: #34c759;
+    --no: #ff453a;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 16px/1.65 ui-sans-serif, system-ui, sans-serif;
+    padding: clamp(20px, 5vw, 56px);
+    max-width: 780px; margin-inline: auto;
+  }
+  .eyebrow {
+    font: 600 12px/1 ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--amber);
+    margin-bottom: 14px;
+  }
+  h1 { font-size: clamp(23px, 4vw, 31px); letter-spacing: -0.02em; margin-bottom: 12px; }
+  .sub { color: var(--dim); font-size: 15px; margin-bottom: 28px; max-width: 62ch; }
+  .panel {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; padding: 22px; margin-bottom: 18px;
+  }
+  .panel h2 {
+    font: 600 12px/1 inherit; letter-spacing: 0.07em; text-transform: uppercase;
+    color: var(--dim); margin-bottom: 16px;
+  }
+
+  /* Each purpose is a fieldset: grouping matters semantically, not just
+     visually, so a screen reader announces the purpose as a unit. */
+  fieldset.purpose {
+    border: 1px solid var(--border); border-radius: 11px;
+    padding: 16px; margin-bottom: 14px;
+  }
+  fieldset.purpose legend {
+    font: 600 14.5px/1.4 inherit; padding: 0 8px;
+  }
+  .status-chip {
+    font: 600 11px/1 inherit; padding: 3px 8px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--dim); margin-left: 8px;
+    vertical-align: middle; white-space: nowrap;
+  }
+  .status-chip[data-state="given"] { color: var(--ok); border-color: color-mix(in oklab, var(--ok) 45%, transparent); }
+  .status-chip[data-state="refused"],
+  .status-chip[data-state="withdrawn"],
+  .status-chip[data-state="expired"] { color: var(--no); border-color: color-mix(in oklab, var(--no) 45%, transparent); }
+  .key-text { color: var(--text); font-size: 15px; margin: 8px 0 0; }
+  details { margin-top: 10px; }
+  summary {
+    cursor: pointer; color: var(--dim); font-size: 13.5px;
+  }
+  summary:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+  details .detail-text {
+    color: var(--dim); font-size: 14px; margin-top: 8px;
+    padding-left: 14px; border-left: 2px solid var(--border);
+  }
+  .actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+  button {
+    background: transparent; color: var(--text); border: 1px solid var(--border);
+    border-radius: 999px; padding: 7px 15px; font: 500 13px/1 inherit; cursor: pointer;
+  }
+  button:hover { border-color: var(--dim); }
+  button:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+  button[data-primary] { border-color: color-mix(in oklab, var(--ok) 50%, transparent); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+  .disclaimer {
+    border-left: 3px solid var(--amber); padding: 12px 16px;
+    background: color-mix(in oklab, var(--amber) 6%, transparent);
+    border-radius: 0 10px 10px 0; font-size: 14px; color: var(--dim);
+  }
+  .disclaimer strong { color: var(--text); }
+  .facts { font: 12.5px/1.7 ui-monospace, monospace; color: var(--dim); white-space: pre-wrap; }
+  .log { font: 12px/1.6 ui-monospace, monospace; color: var(--dim); max-height: 150px; overflow-y: auto; white-space: pre-wrap; }
+  .visually-hidden {
+    position: absolute; width: 1px; height: 1px; margin: -1px;
+    overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
+  code { font: 0.88em ui-monospace, monospace; background: #23262c; padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<p class="eyebrow">Local-first · zero dependencies · MIT</p>
+<h1>What you are agreeing to</h1>
+<p class="sub">This tool reads a signal from a switch, a gaze tracker, or an EEG sensor so it can
+tell what you are pointing at. Before it does anything, here is what that means — in plain
+words, one purpose at a time. You can change your mind at any point, including turning everything off.</p>
+
+<div class="panel">
+  <h2>Your choices</h2>
+  <div id="purposes"></div>
+  <div class="row" style="margin-top:6px">
+    <button id="all-off">Turn everything off</button>
+    <button id="erase">Erase my record</button>
+    <span class="status" id="live" aria-live="polite"></span>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>What this does not do</h2>
+  <div class="disclaimer" id="disclaimer"></div>
+</div>
+
+<div class="panel">
+  <h2>Your record on this device</h2>
+  <div class="facts" id="facts"></div>
+  <details>
+    <summary>Show the full event log</summary>
+    <div class="log" id="log"></div>
+  </details>
+</div>
+
+<script type="module">
+import { ConsentManager, PURPOSES, noticeVersion } from '../src/index.js';
+
+const consent = new ConsentManager({ storage: localStorage, validDays: 365 });
+
+const purposesEl = document.getElementById('purposes');
+const liveEl = document.getElementById('live');
+const logEl = document.getElementById('log');
+const factsEl = document.getElementById('facts');
+
+// The version of the notice text this page is showing. Recorded in every
+// decision so "what did they actually agree to" stays answerable.
+const NOTICE = noticeVersion();
+
+const announce = (msg) => { liveEl.textContent = msg; };
+
+function render() {
+  const snap = consent.snapshot();
+  purposesEl.textContent = '';
+
+  for (const p of snap.purposes) {
+    const state = p.state ?? 'not decided';
+    const fs = document.createElement('fieldset');
+    fs.className = 'purpose';
+
+    const legend = document.createElement('legend');
+    legend.textContent = p.label;
+    const chip = document.createElement('span');
+    chip.className = 'status-chip';
+    chip.dataset.state = p.state ?? '';
+    chip.textContent = state;
+    legend.appendChild(chip);
+    fs.appendChild(legend);
+
+    // Layer 1: the concise, focused statement (45 CFR 46.116(a)(5)(i)).
+    const key = document.createElement('p');
+    key.className = 'key-text';
+    key.textContent = p.keyText;
+    fs.appendChild(key);
+
+    // Layer 2: the full explanation, on request.
+    const details = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = 'More detail';
+    details.appendChild(summary);
+    const more = document.createElement('div');
+    more.className = 'detail-text';
+    more.textContent = p.detailText;
+    details.appendChild(more);
+    fs.appendChild(details);
+
+    // Actions, described so the purpose is clear from the control alone.
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    const grant = document.createElement('button');
+    grant.textContent = p.state === 'given' ? 'Agree again' : 'Agree';
+    grant.dataset.primary = '';
+    grant.setAttribute('aria-label', `Agree: ${p.label}`);
+    grant.addEventListener('click', () => {
+      consent.grant(p.id, { noticeVersion: NOTICE, language: 'en' });
+      announce(`Agreed: ${p.label}`);
+    });
+    actions.appendChild(grant);
+
+    if (p.state === 'given') {
+      const wd = document.createElement('button');
+      wd.textContent = 'Withdraw';
+      wd.setAttribute('aria-label', `Withdraw consent: ${p.label}`);
+      wd.addEventListener('click', () => {
+        consent.withdraw(p.id);
+        announce(`Withdrawn: ${p.label}`);
+      });
+      actions.appendChild(wd);
+    } else if (p.state !== 'refused') {
+      const no = document.createElement('button');
+      no.textContent = 'No thanks';
+      no.setAttribute('aria-label', `Decline: ${p.label}`);
+      no.addEventListener('click', () => {
+        consent.refuse(p.id, { noticeVersion: NOTICE, language: 'en' });
+        announce(`Declined: ${p.label}`);
+      });
+      actions.appendChild(no);
+    }
+    fs.appendChild(actions);
+    purposesEl.appendChild(fs);
+  }
+
+  document.getElementById('disclaimer').innerHTML =
+    `<strong>${snap.disclaimer.short}</strong><br><br>` +
+    snap.disclaimer.full.replace(/\n/g, '<br>').replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+  factsEl.textContent = [
+    `record id      ${snap.recordId.slice(0, 18)}…`,
+    `created        ${snap.createdAt}`,
+    `granted        ${snap.granted.length ? snap.granted.join(', ') : 'nothing'}`,
+    `recipients     ${snap.handling.recipientsDeclaration}`,
+    `stored         ${snap.handling.storage}`,
+    `events         ${snap.eventCount}`,
+    `chain intact   ${snap.chain.ok ? 'yes' : 'NO — the log was modified'}`,
+  ].join('\n');
+
+  logEl.textContent = consent.record.events
+    .map((e) => `${String(e.seq).padStart(3)}  ${e.type.padEnd(10)} ${e.purposeId ?? ''}  ${e.hash}`)
+    .join('\n') || '(no events yet)';
+
+  // Show the gate's effect: what the tool may do right now.
+  const mayRead = consent.isGranted(PURPOSES.ACQUIRE_SIGNAL.id);
+  const mayProcess = consent.isGranted(PURPOSES.PROCESS_LOCALLY.id);
+  document.getElementById('live').textContent =
+    `signal readable: ${mayRead ? 'yes' : 'no'} · processing: ${mayProcess ? 'yes' : 'no'}`;
+}
+
+document.getElementById('all-off').addEventListener('click', () => {
+  consent.withdrawAll();
+  announce('Everything is off.');
+});
+
+document.getElementById('erase').addEventListener('click', () => {
+  consent.erase();
+  announce('Record erased.');
+});
+
+consent.onChange(render);
+render();
+</script>
+</body>
+</html>

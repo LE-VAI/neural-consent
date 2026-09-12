@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['18', '20', '22']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm test
+
+  claims:
+    name: The disclaimer still refuses to claim compliance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Assert the disclaimer makes no compliance claim
+        # This job exists because the failure mode is silent: a well-meaning
+        # edit that adds "ISO 27560 compliant" to the disclaimer would look
+        # like an improvement and would be a false claim. The test suite checks
+        # it, and this job makes the check unmissable in CI.
+        run: |
+          node -e "
+          import('./src/index.js').then(({ DISCLAIMER }) => {
+            const t = (DISCLAIMER.short + ' ' + DISCLAIMER.full).toLowerCase();
+            const allowedNegations = /does not (claim|make)|not a claim|no certification/;
+            const forbidden = ['ccpa compliant','gdpr compliant','hipaa compliant','fda cleared','privacy-compliant by architecture'];
+            for (const f of forbidden) {
+              if (t.includes(f)) { console.error('FORBIDDEN CLAIM: ' + f); process.exit(1); }
+            }
+            if (!allowedNegations.test(t)) {
+              console.error('disclaimer no longer states what it does NOT do');
+              process.exit(1);
+            }
+            console.log('disclaimer makes no compliance claim');
+          }).catch(e => { console.error(e.message); process.exit(1); });
+          "

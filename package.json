@@ -1,0 +1,45 @@
+{
+  "name": "neural-consent",
+  "version": "0.1.0",
+  "description": "Purpose-granular consent records with a tamper-evident local event log for neural-data tools. Local-first, zero dependencies. Structured on the ISO/IEC TS 27560 field model — and explicit about what it does not claim.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./record.js": "./src/record.js",
+    "./notices.js": "./src/notices.js"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test tests/consent.test.mjs"
+  },
+  "keywords": [
+    "consent",
+    "neural-data",
+    "neurotech",
+    "bci",
+    "privacy",
+    "consent-record",
+    "iso-27560",
+    "local-first",
+    "accessibility",
+    "a11y"
+  ],
+  "license": "MIT",
+  "author": "Le Vain Bey",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LE-VAI/neural-consent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/LE-VAI/neural-consent/issues"
+  },
+  "homepage": "https://github.com/LE-VAI/neural-consent#readme",
+  "engines": {
+    "node": ">=18"
+  }
+}
