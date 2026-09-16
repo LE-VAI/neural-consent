@@ -1,13 +1,14 @@
 {
   "name": "neural-consent",
   "version": "0.1.0",
-  "description": "Purpose-granular consent records with a tamper-evident local event log for neural-data tools. Local-first, zero dependencies. Structured on the ISO/IEC TS 27560 field model — and explicit about what it does not claim.",
+  "description": "Purpose-granular consent records with a tamper-evident local event log for neural-data tools. Local-first, zero dependencies. Structured on the ISO/IEC TS 27560 field model \u2014 and explicit about what it does not claim.",
   "type": "module",
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
     "./record.js": "./src/record.js",
-    "./notices.js": "./src/notices.js"
+    "./notices.js": "./src/notices.js",
+    "./consent.js": "./src/consent.js"
   },
   "files": [
     "src",
