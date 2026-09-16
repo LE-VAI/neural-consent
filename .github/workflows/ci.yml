@@ -22,6 +22,21 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: npm test
 
+  package:
+    name: Package surface
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Every shipped file is importable
+        # src/consent.js shipped here while being absent from the exports map,
+        # so ConsentManager — the class the package is named for — could not be
+        # imported from a subpath, while its two sibling modules could. The
+        # class of bug is invisible until someone follows the docs and fails.
+        run: python3 scripts/audit-exports.py
+
   claims:
     name: The disclaimer still refuses to claim compliance
     runs-on: ubuntu-latest
