@@ -5,7 +5,10 @@
   "type": "module",
   "main": "src/index.js",
   "exports": {
-    ".": "./src/index.js",
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    },
     "./record.js": "./src/record.js",
     "./notices.js": "./src/notices.js",
     "./consent.js": "./src/consent.js"
@@ -42,5 +45,6 @@
   "homepage": "https://github.com/LE-VAI/neural-consent#readme",
   "engines": {
     "node": ">=18"
-  }
+  },
+  "types": "./src/index.d.ts"
 }

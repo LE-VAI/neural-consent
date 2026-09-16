@@ -209,6 +209,67 @@ test('removing an event is detected', () => {
   assert.equal(consent.record.verify().ok, false, 'a missing event breaks the chain');
 });
 
+// -- CRITICAL: the chain must witness the AUTHORIZATION state ----------------
+
+test('CRITICAL: a forged grant is detected — the chain covers the gate state', () => {
+  // Before the fix the chain protected the wrong artifact. isGranted() reads
+  // `purposes`; verify() walked `events`; fromJSON restored both independently
+  // and never verified. So a record with a hand-written purposes block and an
+  // EMPTY event log reported granted:true AND chain-ok:true — the chain
+  // vouched for an authorization state it had never witnessed.
+  const forged = new ConsentRecord({ now: () => 1000 });
+  forged.purposes = {
+    acquire_signal: {
+      purposeId: 'acquire_signal', state: 'given', noticeVersion: 'v1', language: 'en',
+      dataTypes: [], sensitivity: 'neural', grantedAt: new Date(1000).toISOString(),
+      validUntil: null, withdrawalMethod: 'x', legalBasis: 'consent',
+    },
+  };
+  forged.events = []; // never consented — no history at all
+
+  const v = forged.verify();
+  assert.equal(v.ok, false, 'a state with no events must not verify');
+  assert.equal(v.stateMismatch, true, 'and the mismatch is reported as such');
+});
+
+test('CRITICAL: tampering with purposes after a real grant breaks verification', () => {
+  const rec = new ConsentRecord({ now: () => 1000 });
+  rec.decide('acquire_signal', 'given', { noticeVersion: 'v1' });
+  assert.equal(rec.verify().ok, true, 'an untouched record verifies');
+
+  // Swap the state behind the log's back — the realistic tamper.
+  rec.purposes.acquire_signal.state = 'withdrawn';
+  const v = rec.verify();
+  assert.equal(v.stateMismatch, true, 'the edited state must be detectable');
+  assert.equal(v.ok, false);
+});
+
+test('CRITICAL: fromJSON refuses a tampered record and grants NOTHING', () => {
+  // Fail closed. The alternative — restoring whatever the file says — is how a
+  // tampered record becomes a working grant.
+  const rec = new ConsentRecord({ now: () => 1000 });
+  rec.decide('acquire_signal', 'given', { noticeVersion: 'v1' });
+
+  const json = rec.toJSON();
+  json.purposes.acquire_signal.validUntil = null; // edit outside the log
+  json.purposes.some_new_purpose = { purposeId: 'some_new_purpose', state: 'given' };
+
+  const restored = ConsentRecord.fromJSON(json, { now: () => 1000 });
+  assert.equal(restored.isGranted('acquire_signal'), false, 'a tampered record grants nothing');
+  assert.equal(restored.isGranted('some_new_purpose'), false, 'nor does an invented purpose');
+  assert.ok(restored.integrityReason, 'and it says why');
+  assert.ok(/edited|broken/i.test(restored.integrityReason));
+});
+
+test('an HONEST round-trip still restores granted state', () => {
+  // The fix must not break the legitimate path.
+  const rec = new ConsentRecord({ now: () => 1000 });
+  rec.decide('acquire_signal', 'given', { noticeVersion: 'v1' });
+  const restored = ConsentRecord.fromJSON(rec.toJSON(), { now: () => 1000 });
+  assert.equal(restored.isGranted('acquire_signal'), true, 'an untampered record restores');
+  assert.equal(restored.integrityReason, null);
+});
+
 // -- persistence ------------------------------------------------------------
 
 test('a grant survives a reload through storage', () => {

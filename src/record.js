@@ -84,6 +84,22 @@ function eventHash(prevHash, event) {
 }
 
 /**
+ * A hash of the consent STATE — the projection of `purposes` that the gate
+ * actually reads. Folded into every event so the chain witnesses authorization,
+ * not merely activity (see append()).
+ *
+ * Only the fields that decide access are included: a record whose wording or
+ * timestamps differ is not a tampered grant, and hashing everything would make
+ * the check fire on innocuous edits until it became ignored.
+ */
+function stateHashOf(purposes) {
+  const projection = Object.keys(purposes)
+    .sort()
+    .map((id) => [id, purposes[id]?.state ?? null, purposes[id]?.validUntil ?? null]);
+  return fnv1a(canonical(projection));
+}
+
+/**
  * A local consent record.
  *
  * @param {object} [options]
@@ -97,6 +113,9 @@ export class ConsentRecord {
     // depends on it, and reading it first was a real bug caught by the suite.
     this._now = options.now ?? (() => Date.now());
     this.schemaVersion = SCHEMA_VERSION;
+    /** Set by fromJSON when a restored record failed verification. */
+    this.integrity = { ok: true, brokenAt: -1, stateMismatch: false };
+    this.integrityReason = null;
     this.recordId = options.recordId ?? generateId();
     this.subjectId = options.subjectId ?? generateId();
     this.createdAt = options.createdAt ?? new Date(this._now()).toISOString();
@@ -239,7 +258,23 @@ export class ConsentRecord {
 
   /**
    * Append an event to the tamper-evident log.
-   * The chain makes accidental or partial edits detectable.
+   *
+   * Each event also carries a hash of the CURRENT consent state, and this is
+   * load-bearing rather than decorative.
+   *
+   * Without it the chain protected the wrong artifact. `isGranted()` reads
+   * `purposes`; `verify()` walks `events`; `toJSON()` serialises them as
+   * independent siblings and `fromJSON()` restored both without verifying. So a
+   * forged record with `purposes.acquire_signal.state = 'given'` and an EMPTY
+   * event log reported `isGranted() === true` AND `verify().ok === true` — the
+   * chain vouched for an authorization state it had never witnessed.
+   *
+   * Verified before the fix: a record with zero events and a hand-written
+   * purposes block returned granted:true, chain-intact:true.
+   *
+   * Hashing the state into every event closes that: altering `purposes` without
+   * the corresponding event makes `verify()` fail at the first event whose
+   * recorded state no longer matches.
    */
   append(type, payload = {}) {
     const prev = this.events[this.events.length - 1];
@@ -249,6 +284,8 @@ export class ConsentRecord {
       at: new Date(this._now()).toISOString(),
       ...payload,
       prevHash: prev ? prev.hash : 'genesis',
+      // The state this event produced. Checked by verify().
+      stateHash: stateHashOf(this.purposes),
     };
     event.hash = eventHash(event.prevHash, event);
     this.events.push(event);
@@ -256,18 +293,37 @@ export class ConsentRecord {
   }
 
   /**
-   * Verify the event chain. Returns { ok, brokenAt } — brokenAt is the seq of
-   * the first event whose hash does not match its contents, or -1.
+   * Verify the event chain AND that the live consent state matches what the
+   * chain recorded.
+   *
+   * Returns { ok, brokenAt, stateMismatch }.
+   *   - brokenAt       — seq of the first event whose hash does not match its
+   *                      contents, or -1
+   *   - stateMismatch  — true when the event chain is internally sound but
+   *                      `purposes` does not match the state the last event
+   *                      recorded. That is the signature of an edited record:
+   *                      the log is intact and the authorization state was
+   *                      changed behind it.
    */
   verify() {
     let prevHash = 'genesis';
     for (const event of this.events) {
-      if (event.prevHash !== prevHash) return { ok: false, brokenAt: event.seq };
+      if (event.prevHash !== prevHash) return { ok: false, brokenAt: event.seq, stateMismatch: false };
       const expected = eventHash(prevHash, event);
-      if (event.hash !== expected) return { ok: false, brokenAt: event.seq };
+      if (event.hash !== expected) return { ok: false, brokenAt: event.seq, stateMismatch: false };
       prevHash = event.hash;
     }
-    return { ok: true, brokenAt: -1 };
+    // A record with decisions but no events is not verifiable — it claims an
+    // authorization state with no history to support it.
+    const last = this.events[this.events.length - 1];
+    if (!last) {
+      const hasState = Object.keys(this.purposes).length > 0;
+      return { ok: !hasState, brokenAt: -1, stateMismatch: hasState };
+    }
+    if (last.stateHash !== stateHashOf(this.purposes)) {
+      return { ok: false, brokenAt: -1, stateMismatch: true };
+    }
+    return { ok: true, brokenAt: -1, stateMismatch: false };
   }
 
   /** Serialise for export or storage. */
@@ -284,6 +340,18 @@ export class ConsentRecord {
   }
 
   /** Restore from a serialised record. */
+  /**
+   * Restore from a serialised record.
+   *
+   * VERIFIES, and fails closed. A record whose chain does not check out, or
+   * whose live grant state does not match what the chain recorded, is returned
+   * with an EMPTY purpose set — so the gate refuses everything — and the
+   * problem is reported on `record.integrity`.
+   *
+   * The alternative (restoring whatever the file says) is how a tampered record
+   * becomes a working grant. Since this is the only path from storage into the
+   * gate, it is the right place to be strict.
+   */
   static fromJSON(data, options = {}) {
     const rec = new ConsentRecord({
       ...options,
@@ -292,9 +360,19 @@ export class ConsentRecord {
       createdAt: data.createdAt,
     });
     rec.schemaVersion = data.schemaVersion ?? SCHEMA_VERSION;
-    rec.purposes = data.purposes ?? {};
     rec.handling = data.handling ?? rec.handling;
-    rec.events = data.events ?? [];
+    rec.events = Array.isArray(data.events) ? data.events : [];
+    rec.purposes = data.purposes ?? {};
+
+    const integrity = rec.verify();
+    rec.integrity = integrity;
+    if (!integrity.ok || integrity.stateMismatch) {
+      // Fail closed: preserve the evidence, grant nothing.
+      rec.purposes = {};
+      rec.integrityReason = integrity.stateMismatch
+        ? 'consent state does not match the event chain — the record was edited'
+        : `event chain broken at seq ${integrity.brokenAt}`;
+    }
     return rec;
   }
 
