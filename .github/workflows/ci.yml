@@ -66,3 +66,130 @@ jobs:
             console.log('disclaimer makes no compliance claim');
           }).catch(e => { console.error(e.message); process.exit(1); });
           "
+
+      - name: Assert the disclaimer makes no claim about the HOST tool
+        # The disclaimer renders inside the embedding tool's UI. A claim about
+        # the host's behaviour, made by a library that cannot observe it, would
+        # be this library telling a tool's users something false in that tool's
+        # own interface — and would become false silently, when the host adds
+        # an online path. The library may only claim things about itself.
+        run: |
+          node -e "
+          import('./src/index.js').then(({ DISCLAIMER }) => {
+            const t = DISCLAIMER.full;
+            const banned = [
+              /your signal is processed on this device/i,
+              /is not transmitted/i,
+              /there is no server receiving it/i,
+              /nobody to sell it to/i,
+              /you can verify/i,
+            ];
+            for (const re of banned) {
+              if (re.test(t)) {
+                console.error('HOST-REACHING CLAIM in disclaimer: ' + re);
+                process.exit(1);
+              }
+            }
+            console.log('disclaimer claims nothing about the host');
+          }).catch(e => { console.error(e.message); process.exit(1); });
+          "
+
+      - name: Assert the rendered disclaimer always names the declaration state
+        # With no declaration the rendered text must say NOT DECLARED. An
+        # omitted section reads as "nothing to worry about", which is an
+        # assurance the tool never made.
+        run: |
+          node -e "
+          import('./src/index.js').then(({ ConsentManager }) => {
+            const t = new ConsentManager().disclaimerText();
+            if (!/WHAT THIS TOOL DECLARES ABOUT ITSELF/.test(t)) {
+              console.error('rendered disclaimer omits the declaration section');
+              process.exit(1);
+            }
+            if (!/NOT DECLARED/.test(t)) {
+              console.error('a tool that declared nothing must render as NOT DECLARED');
+              process.exit(1);
+            }
+            console.log('rendered disclaimer states the declaration, including its absence');
+          }).catch(e => { console.error(e.message); process.exit(1); });
+          "
+
+  no-network:
+    name: The library still has no network code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert src/ contains no network API or endpoint
+        # DISCLAIMER.full tells users the consent layer has no network code and
+        # that the project checks it on every commit. This job is that check.
+        # Without it the claim is a statement about the day it was written.
+        run: python3 scripts/audit-no-network.py
+
+  opt-in-purpose:
+    name: The opt-in purpose cannot be granted in a batch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Assert share_derived_metadata is refused without an explicit flag
+        # The guard is one line in consent.js and the failure mode is one line
+        # of ordinary host code: a loop over manager.purposes, a config
+        # default, a "grant all recommended" helper. Any of those would ship
+        # an online-feature permission nobody was asked about.
+        run: |
+          node -e "
+          import('./src/index.js').then(({ ConsentManager, ALL_PURPOSES, noticeVersion }) => {
+            const m = new ConsentManager({ purposes: ALL_PURPOSES.map(p => p.id) });
+            // Batch loop over everything the tool presents.
+            let threw = false;
+            try {
+              for (const p of m.purposes) m.grant(p.id, { noticeVersion: noticeVersion() });
+            } catch { threw = true; }
+            if (!threw) { console.error('a batch grant carried the opt-in purpose'); process.exit(1); }
+            if (m.isGranted('share_derived_metadata')) { console.error('opt-in purpose got granted'); process.exit(1); }
+            // And no other purpose implies it.
+            const m2 = new ConsentManager({ purposes: ALL_PURPOSES.map(p => p.id) });
+            m2.grant('acquire_signal', { noticeVersion: noticeVersion() });
+            if (m2.isGranted('share_derived_metadata')) { console.error('acquire_signal implied it'); process.exit(1); }
+            console.log('opt-in purpose requires an explicit, individual grant');
+          }).catch(e => { console.error(e.message); process.exit(1); });
+          "
+
+  erase-evidence:
+    name: Erasure leaves evidence of itself
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Assert erase() keeps a hash-only tombstone
+        # erase() used to destroy the withdrawal evidence along with the
+        # record, so the strongest protective action a user could take left
+        # them indistinguishable from someone who never consented.
+        run: |
+          node -e "
+          import('./src/index.js').then(({ ConsentManager, PURPOSES, noticeVersion }) => {
+            const store = new Map();
+            const storage = {
+              getItem: k => store.has(k) ? store.get(k) : null,
+              setItem: (k, v) => store.set(k, v),
+              removeItem: k => store.delete(k),
+            };
+            const m = new ConsentManager({ storage });
+            m.grant(PURPOSES.ACQUIRE_SIGNAL.id, { noticeVersion: noticeVersion() });
+            m.withdraw(PURPOSES.ACQUIRE_SIGNAL.id);
+            m.erase();
+            const t = storage.get('neural-consent.record.erased');
+            if (!t) { console.error('erase() left no tombstone'); process.exit(1); }
+            const parsed = JSON.parse(t);
+            if (parsed.withdrawalCount !== 1) { console.error('tombstone lost the withdrawal count'); process.exit(1); }
+            if (!parsed.chainHead) { console.error('tombstone lost the chain head'); process.exit(1); }
+            if (parsed.containsPersonalData !== false) { console.error('tombstone must declare it holds no personal data'); process.exit(1); }
+            if (parsed.purposes || parsed.events) { console.error('tombstone must not carry purposes or events'); process.exit(1); }
+            console.log('erasure leaves a hash-only tombstone');
+          }).catch(e => { console.error(e.message); process.exit(1); });
+          "
+

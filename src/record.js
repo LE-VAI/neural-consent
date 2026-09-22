@@ -35,7 +35,7 @@
  */
 
 /** Bump when the record shape changes; recorded in every record. */
-export const SCHEMA_VERSION = '1.0.0';
+export const SCHEMA_VERSION = '1.1.0';
 
 /**
  * Consent lifecycle states (ISO/IEC TS 27560 event states).
@@ -81,6 +81,47 @@ function canonical(obj) {
 function eventHash(prevHash, event) {
   const { hash, ...rest } = event; // never hash the hash field itself
   return fnv1a(prevHash + '|' + canonical(rest));
+}
+
+/**
+ * The 27560 recipient fields, built from the host's declaration.
+ *
+ * `stated: false` is what appears when the host declared nothing. It is
+ * deliberately not the same shape as "declared nothing is transmitted" —
+ * `stated: true, recipients: []` — because a reader (or a downstream system
+ * ingesting the export) must be able to tell a declaration from a silence.
+ * Conflating them would recreate the bug this function exists to fix, one
+ * layer up: a machine-readable "no transmission" that nobody actually said.
+ */
+function handlingFrom(declaration) {
+  const omittedFields = ['pii_controller_address', 'jurisdiction', 'authority_party'];
+  if (!declaration) {
+    return {
+      storage: 'local-only',
+      stated: false,
+      recipients: [],
+      recipientsDeclaration: 'unstated \u2014 the tool has not declared its handling',
+      signal: null,
+      derivedMetadata: null,
+      declaredBy: null,
+      declaredAt: null,
+      // 27560 fields intentionally not carried (see the file header):
+      omittedFields,
+    };
+  }
+  return {
+    storage: declaration.signal === 'local-only' ? 'local-only' : 'transmitted',
+    stated: true,
+    recipients: [...(declaration.recipients ?? [])],
+    recipientsDeclaration: declaration.derivedMetadata === 'shared'
+      ? `declared shared with: ${(declaration.recipients ?? []).join(', ')}`
+      : 'declared none \u2014 no derived metadata transmitted',
+    signal: declaration.signal,
+    derivedMetadata: declaration.derivedMetadata,
+    declaredBy: declaration.declaredBy ?? null,
+    declaredAt: declaration.declaredAt ?? null,
+    omittedFields,
+  };
 }
 
 /**
@@ -131,22 +172,37 @@ export class ConsentRecord {
     this.events = [];
 
     /**
-     * RECIPIENTS IS ALWAYS EMPTY, AND THAT IS THE POINT.
+     * RECIPIENTS COME FROM THE HOST, NEVER FROM THIS LIBRARY.
      *
-     * 27560 makes "recipient third parties" a mandatory field. For this tool
-     * the honest value is a declared emptiness: there is no server, so there
-     * is nobody to receive the data. Recording that as an explicit field
-     * rather than prose makes the tool's central privacy claim machine-
-     * readable and checkable.
+     * 27560 makes "recipient third parties" a mandatory field. An earlier
+     * version of this file filled it with a constant — `recipients: []` and
+     * `recipientsDeclaration: 'none — no transmission'` — on the reasoning that
+     * this library has no server so there is nobody to receive the data.
+     *
+     * That reasoning is sound about the library and wrong about the record.
+     * The record describes the TOOL, and the tool is the host's code. A host
+     * that later adds one optional online feature would have shipped a machine-
+     * readable declaration, in its own consent record, saying nothing is
+     * transmitted — produced by this library, on the host's behalf, without
+     * the host ever saying so. Same failure as the disclaimer; same fix.
+     *
+     * So `handling` is now derived from a declaration the host supplies. With
+     * no declaration, the record says the handling is UNSTATED. That is a
+     * weaker claim than "none" and it is the true one.
      */
-    this.handling = {
-      storage: 'local-only',
-      recipients: [],
-      recipientsDeclaration: 'none — no transmission',
-      // 27560 fields intentionally not carried (see the file header):
-      omittedFields: ['pii_controller_address', 'jurisdiction', 'authority_party'],
-    };
+    this.declaration = options.declaration ?? null;
+    this.handling = handlingFrom(this.declaration);
   }
+
+  /**
+   * A machine-readable statement of what the tool does with signal and derived
+   * data, for the record's 27560 recipient fields.
+   *
+   * `stated: false` is the honest default and is what makes this function worth
+   * having: a reader of the exported record can distinguish "the tool declared
+   * it transmits nothing" from "nobody recorded an answer."
+   */
+  get declaredHandling() { return handlingFrom(this.declaration); }
 
   /** Local pseudonymous identifier generator (no PII, no network). */
   _newEventId() {
@@ -249,6 +305,52 @@ export class ConsentRecord {
     return this.purposes[purposeId]?.state === 'given';
   }
 
+  /**
+   * How many times consent has been withdrawn in this record's history.
+   *
+   * DERIVED, NOT STORED. A counter field would be one more thing that can fall
+   * out of step with the event log — and this is the worst possible field to
+   * have drift, because it is the one a remote service is asked to trust. It
+   * counts the log, and the log is already hash-chained.
+   */
+  get consentEpoch() {
+    return this.events.filter((e) => e.type === 'withdraw').length;
+  }
+
+  /**
+   * The state a host may include when it makes an outbound request on the
+   * user's behalf, so a service holding a cached grant can tell it has been
+   * revoked.
+   *
+   * WHY THIS EXISTS. Withdrawal in a local-first tool has no reach: the record
+   * lives in the user's browser, and a service that received derived metadata
+   * last week has no way to learn that consent was revoked yesterday. Silence
+   * is indistinguishable from "still granted", which means a revocation the
+   * user made can be quietly ignored by every service they already talked to.
+   * That is the gap. This library cannot close it — honoring a revocation is
+   * the service's job and no client-side code can compel it — but it can make
+   * closing it possible, by putting the epoch in the one place a service will
+   * actually look: the request.
+   *
+   * WHAT IT IS NOT. Not an authorization credential. It contains no secret,
+   * proves nothing, and a service that trusts it without its own verification
+   * is trusting the client to report its own revocation status. It is a
+   * staleness hint: `epoch: 3` against a cached `epoch: 1` means two
+   * withdrawals happened since, so the cached grant is stale.
+   *
+   * The recordId here is the local pseudonymous id. Export it and a service
+   * can correlate; that correlation is exactly the kind of thing a user should
+   * be asked about, which is what SHARE_DERIVED_METADATA covers.
+   */
+  revocationState() {
+    return {
+      recordId: this.recordId,
+      epoch: this.consentEpoch,
+      granted: this.grantedPurposes(),
+      at: new Date(this._now()).toISOString(),
+    };
+  }
+
   /** Every purpose currently granted. */
   grantedPurposes() {
     return Object.entries(this.purposes)
@@ -293,6 +395,29 @@ export class ConsentRecord {
   }
 
   /**
+   * Walk the event chain only: does each event's hash match its contents and
+   * its recorded predecessor?
+   *
+   * Split out from verify() because the combined answer was being reported
+   * under the name `chainIntact`, and the two failure modes are not the same
+   * thing. A record whose purposes were edited behind an untouched log has an
+   * INTACT chain and a state mismatch — verify() correctly returns ok:false,
+   * but reporting that as `chainIntact: false` told a reader the log had been
+   * tampered with when it had not. An instrument that misnames which of two
+   * things went wrong sends the investigation the wrong way.
+   */
+  verifyChain() {
+    let prevHash = 'genesis';
+    for (const event of this.events) {
+      if (event.prevHash !== prevHash) return { ok: false, brokenAt: event.seq };
+      const expected = eventHash(prevHash, event);
+      if (event.hash !== expected) return { ok: false, brokenAt: event.seq };
+      prevHash = event.hash;
+    }
+    return { ok: true, brokenAt: -1 };
+  }
+
+  /**
    * Verify the event chain AND that the live consent state matches what the
    * chain recorded.
    *
@@ -306,13 +431,8 @@ export class ConsentRecord {
    *                      changed behind it.
    */
   verify() {
-    let prevHash = 'genesis';
-    for (const event of this.events) {
-      if (event.prevHash !== prevHash) return { ok: false, brokenAt: event.seq, stateMismatch: false };
-      const expected = eventHash(prevHash, event);
-      if (event.hash !== expected) return { ok: false, brokenAt: event.seq, stateMismatch: false };
-      prevHash = event.hash;
-    }
+    const chain = this.verifyChain();
+    if (!chain.ok) return { ok: false, brokenAt: chain.brokenAt, stateMismatch: false };
     // A record with decisions but no events is not verifiable — it claims an
     // authorization state with no history to support it.
     const last = this.events[this.events.length - 1];
@@ -334,8 +454,13 @@ export class ConsentRecord {
       subjectId: this.subjectId,
       createdAt: this.createdAt,
       purposes: this.purposes,
+      declaration: this.declaration,
       handling: this.handling,
       events: this.events,
+      // consentEpoch is deliberately NOT written. It is derived from the events,
+      // which are already here, so storing a copy would create a second source
+      // of truth for the one number a remote service is asked to trust — and
+      // the wrong copy would be the editable one.
     };
   }
 
@@ -353,14 +478,25 @@ export class ConsentRecord {
    * gate, it is the right place to be strict.
    */
   static fromJSON(data, options = {}) {
+    // The declaration is taken from the caller FIRST, because it is the current
+    // truth about the host. A declaration serialised into an old file describes
+    // the tool as it was when that file was written — if the host has since
+    // added an online path, restoring the stale declaration would put a
+    // reassuring "nothing transmitted" back into the record after the fact.
+    // Caller-supplied wins; the file's copy is a fallback for a tool that has
+    // no way to restate it.
     const rec = new ConsentRecord({
       ...options,
+      declaration: options.declaration ?? data.declaration ?? null,
       recordId: data.recordId,
       subjectId: data.subjectId,
       createdAt: data.createdAt,
     });
     rec.schemaVersion = data.schemaVersion ?? SCHEMA_VERSION;
-    rec.handling = data.handling ?? rec.handling;
+    // handling is DERIVED, never restored verbatim — see the constructor. The
+    // stored copy is discarded on purpose: it may predate the current
+    // declaration, and a stale recipient list is the exact artifact that must
+    // not survive a refresh.
     rec.events = Array.isArray(data.events) ? data.events : [];
     rec.purposes = data.purposes ?? {};
 
@@ -376,15 +512,28 @@ export class ConsentRecord {
     return rec;
   }
 
-  /** A human-readable summary — what the person can actually read back. */
+  /**
+   * A human-readable summary — what the person can actually read back.
+   *
+   * The two integrity facts are reported SEPARATELY and named for what they
+   * actually are. See verifyChain() for why the combined `ok` was the wrong
+   * thing to label "chainIntact".
+   */
   summary() {
+    const chain = this.verifyChain();
+    const state = this.verify();
     return {
       recordId: this.recordId,
       createdAt: this.createdAt,
       granted: this.grantedPurposes(),
       events: this.events.length,
-      chainIntact: this.verify().ok,
+      chainIntact: chain.ok,
+      // Distinct from chainIntact, and the reason this summary was misleading
+      // before: a record can have an intact log and a rewritten grant.
+      stateMatchesChain: !state.stateMismatch,
+      brokenAt: chain.ok ? -1 : chain.brokenAt,
       recipients: this.handling.recipientsDeclaration,
+      handlingStated: this.handling.stated,
     };
   }
 

@@ -124,9 +124,25 @@ words, one purpose at a time. You can change your mind at any point, including t
 </div>
 
 <script type="module">
-import { ConsentManager, PURPOSES, noticeVersion } from '../src/index.js';
+import {
+  ConsentManager, PURPOSES, noticeVersion,
+  SIGNAL_HANDLING, DERIVED_METADATA_HANDLING,
+} from '../src/index.js';
 
-const consent = new ConsentManager({ storage: localStorage, validDays: 365 });
+// This page is the HOST. Everything the library says about data handling is
+// built from THIS declaration — the library has no way to know what this page
+// does with a signal, so it refuses to guess. Delete the declaration below and
+// the rendered disclaimer switches to "NOT DECLARED", which is the honest
+// state for any host that has not answered the question.
+const consent = new ConsentManager({
+  storage: localStorage,
+  validDays: 365,
+  declaration: {
+    signal: SIGNAL_HANDLING.LOCAL_ONLY,
+    derivedMetadata: DERIVED_METADATA_HANDLING.NONE,
+    declaredBy: 'this demo page',
+  },
+});
 
 const purposesEl = document.getElementById('purposes');
 const liveEl = document.getElementById('live');
@@ -210,9 +226,13 @@ function render() {
     purposesEl.appendChild(fs);
   }
 
+  // The renderable disclaimer WITH this page's declaration appended. Using
+  // DISCLAIMER.full alone would describe only what the library does and say
+  // nothing about the host — which is exactly the confusion the split exists
+  // to prevent.
   document.getElementById('disclaimer').innerHTML =
     `<strong>${snap.disclaimer.short}</strong><br><br>` +
-    snap.disclaimer.full.replace(/\n/g, '<br>').replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    snap.disclaimerText.replace(/\n/g, '<br>').replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
 
   factsEl.textContent = [
     `record id      ${snap.recordId.slice(0, 18)}…`,
@@ -221,7 +241,12 @@ function render() {
     `recipients     ${snap.handling.recipientsDeclaration}`,
     `stored         ${snap.handling.storage}`,
     `events         ${snap.eventCount}`,
-    `chain intact   ${snap.chain.ok ? 'yes' : 'NO — the log was modified'}`,
+    `withdrawals    ${snap.consentEpoch} (epoch sent to any service this asks)`,
+    // Two separate facts, reported separately. `chain.ok` is false for a
+    // broken log AND for a grant edited behind an intact one; collapsing them
+    // into one "chain intact" line told the reader the wrong one had happened.
+    `chain intact   ${snap.chainIntact ? 'yes' : 'NO — the log was modified'}`,
+    `state matches  ${snap.chain.stateMismatch ? 'NO — grants were edited' : 'yes'}`,
   ].join('\n');
 
   logEl.textContent = consent.record.events

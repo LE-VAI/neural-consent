@@ -11,19 +11,39 @@
  * on what the code does. A consent screen cannot change that. The DISCLAIMER
  * export states this in the words the tool should show.
  *
- * The honest position this module is built on: a tool that never transmits
- * the signal has no third party to share with, nothing to sell, and no
- * database to breach. That is a verifiable statement about the software. The
- * record states it as a machine-readable field rather than as a promise.
+ * THE LINE THIS MODULE DRAWS. It speaks for itself and not for the tool around
+ * it. Two facts about the library are checkable and CI checks them: it has no
+ * network code, and its event log is hash-chained. What the EMBEDDING TOOL does
+ * with a signal is a different question that this library cannot answer — so it
+ * does not answer it, and shows the tool's own declaration instead. An earlier
+ * version asserted "your signal is not transmitted" in text rendered inside the
+ * host's UI; that was a claim about code the library does not control, and a
+ * host adding one optional online path would have made it false. See
+ * notices.js.
+ *
+ * ONE OPT-IN PURPOSE. Tools that read locally but offer an optional online
+ * feature can present `share_derived_metadata`. It is excluded from the default
+ * set, cannot be bundled with any other purpose, and its grant throws unless
+ * the caller passes `{ explicit: true }`.
  */
 
 export {
   ConsentManager,
   ConsentRequiredError,
   PURPOSES,
+  CORE_PURPOSES,
+  DEFAULT_PURPOSES,
+  ALL_PURPOSES,
   DISCLAIMER,
+  SIGNAL_HANDLING,
+  DERIVED_METADATA_HANDLING,
   noticeVersion,
   purposeById,
+  resolvePurposes,
+  normalizeDeclaration,
+  declarationText,
+  disclaimerText,
+  keyInformationText,
 } from './consent.js';
 
 export {
@@ -33,5 +53,3 @@ export {
   generateId,
   fnv1a,
 } from './record.js';
-
-export { keyInformationText } from './notices.js';

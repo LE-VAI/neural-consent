@@ -14,9 +14,16 @@ import {
   ConsentManager,
   ConsentRequiredError,
   PURPOSES,
+  CORE_PURPOSES,
+  DEFAULT_PURPOSES,
+  ALL_PURPOSES,
   DISCLAIMER,
+  SIGNAL_HANDLING,
+  DERIVED_METADATA_HANDLING,
   noticeVersion,
   keyInformationText,
+  normalizeDeclaration,
+  declarationText,
 } from '../src/index.js';
 import { ConsentRecord, fnv1a } from '../src/record.js';
 
@@ -37,7 +44,7 @@ const ACQ = PURPOSES.ACQUIRE_SIGNAL.id;
 
 test('nothing is granted on a fresh install', () => {
   const consent = new ConsentManager();
-  for (const p of Object.values(PURPOSES)) {
+  for (const p of ALL_PURPOSES) {
     assert.equal(consent.isGranted(p.id), false, `${p.id} must start ungranted`);
   }
 });
@@ -120,11 +127,52 @@ test('expiry is applied on load, so a stale record is not silently valid', () =>
 
 test('withdrawAll turns everything off in one action', () => {
   const consent = new ConsentManager();
-  for (const p of Object.values(PURPOSES)) consent.grant(p.id, { noticeVersion: noticeVersion() });
+  // The opt-in purpose is added explicitly here, because a tool that presents
+  // it must say so — and granting it needs { explicit: true }.
+  const withOptIn = new ConsentManager({
+    purposes: ALL_PURPOSES.map((p) => p.id),
+  });
+  withOptIn.grant(ACQ, { noticeVersion: noticeVersion() });
+  for (const id of ['process_locally', 'persist_locally', 'export']) {
+    withOptIn.grant(id, { noticeVersion: noticeVersion() });
+  }
+  withOptIn.grant(PURPOSES.SHARE_DERIVED_METADATA.id, {
+    noticeVersion: noticeVersion([PURPOSES.SHARE_DERIVED_METADATA]), explicit: true,
+  });
+  assert.equal(withOptIn.granted().length, 5);
+
+  const events = withOptIn.withdrawAll();
+  assert.equal(events.length, 5);
+  assert.equal(withOptIn.granted().length, 0);
+
+  // The default manager still has its own four.
+  for (const p of DEFAULT_PURPOSES) consent.grant(p.id, { noticeVersion: noticeVersion() });
   assert.equal(consent.granted().length, 4);
-  const events = consent.withdrawAll();
-  assert.equal(events.length, 4);
-  assert.equal(consent.granted().length, 0);
+  assert.equal(consent.withdrawAll().length, 4);
+});
+
+test('withdrawAll also revokes a grant that is not on the current screen', () => {
+  // A record restored from storage can hold a grant for a purpose this tool no
+  // longer presents. The gate still honours it, so "turn it all off" must
+  // reach it — a live grant the user cannot see is the worst leftover.
+  const storage = fakeStorage();
+  const withOptIn = new ConsentManager({
+    storage,
+    purposes: ALL_PURPOSES.map((p) => p.id),
+    retainErasureLog: false,
+  });
+  withOptIn.grant(PURPOSES.SHARE_DERIVED_METADATA.id, {
+    noticeVersion: noticeVersion([PURPOSES.SHARE_DERIVED_METADATA]), explicit: true,
+  });
+  assert.equal(withOptIn.granted().length, 1);
+
+  // The tool is reconfigured to present only the core four.
+  const narrowed = new ConsentManager({ storage, retainErasureLog: false });
+  assert.equal(narrowed.granted().length, 1, 'the grant is still live');
+  assert.deepEqual(narrowed.snapshot().grantedButNotPresented, [PURPOSES.SHARE_DERIVED_METADATA.id]);
+
+  narrowed.withdrawAll();
+  assert.equal(narrowed.granted().length, 0, 'withdrawAll reached the hidden grant');
 });
 
 test('re-affirmation is recorded (Colorado requires periodic refresh)', () => {
@@ -161,11 +209,98 @@ test('the record carries the 27560-shaped fields', () => {
   assert.ok(entry.dataTypes !== undefined);
 });
 
-test('recipients are declared as none — the machine-readable privacy claim', () => {
+test('with no declaration the record says UNSTATED, not "none"', () => {
+  // The earlier version hardcoded 'none — no transmission' here. That is a
+  // claim about the HOST's behaviour, made by a library that cannot know it.
+  // A host that later adds an online path would ship a machine-readable
+  // "nothing transmitted" it never said. The honest default is silence.
   const consent = new ConsentManager();
   assert.deepEqual(consent.record.handling.recipients, []);
-  assert.equal(consent.record.handling.recipientsDeclaration, 'none — no transmission');
+  assert.equal(consent.record.handling.stated, false);
+  assert.match(consent.record.handling.recipientsDeclaration, /unstated/i);
+  assert.equal(consent.record.handling.signal, null, 'nothing is asserted about signal');
+});
+
+test('a declaration makes the recipients field machine-readable', () => {
+  const consent = new ConsentManager({
+    declaration: {
+      signal: SIGNAL_HANDLING.LOCAL_ONLY,
+      derivedMetadata: DERIVED_METADATA_HANDLING.NONE,
+      declaredBy: 'Example Tool',
+    },
+  });
+  assert.equal(consent.record.handling.stated, true);
   assert.equal(consent.record.handling.storage, 'local-only');
+  assert.deepEqual(consent.record.handling.recipients, []);
+  assert.match(consent.record.handling.recipientsDeclaration, /declared none/i);
+  assert.equal(consent.record.handling.declaredBy, 'Example Tool');
+});
+
+test('a host that shares derived metadata must name recipients', () => {
+  // "shared, recipients: []" is not a weaker claim than a named list — it is
+  // an unanswerable one, and it would render next to a consent screen as
+  // reassurance. Refused outright.
+  const incoherent = new ConsentManager({
+    declaration: {
+      signal: SIGNAL_HANDLING.LOCAL_ONLY,
+      derivedMetadata: DERIVED_METADATA_HANDLING.SHARED,
+      recipients: [],
+    },
+  });
+  assert.equal(incoherent.declaration, null, 'an incoherent declaration is refused');
+  assert.equal(incoherent.record.handling.stated, false);
+
+  // Naming recipients while claiming nothing is shared is the same class of
+  // contradiction, in the other direction.
+  assert.equal(normalizeDeclaration({
+    signal: SIGNAL_HANDLING.LOCAL_ONLY,
+    derivedMetadata: DERIVED_METADATA_HANDLING.NONE,
+    recipients: ['api.example.com'],
+  }), null);
+
+  // A complete one is accepted.
+  const ok = normalizeDeclaration({
+    signal: SIGNAL_HANDLING.LOCAL_ONLY,
+    derivedMetadata: DERIVED_METADATA_HANDLING.SHARED,
+    recipients: ['api.example.com'],
+  });
+  assert.ok(ok);
+  assert.deepEqual([...ok.recipients], ['api.example.com']);
+});
+
+test('an unrecognised declaration value is refused, not passed through', () => {
+  assert.equal(normalizeDeclaration({
+    signal: 'probably-fine',
+    derivedMetadata: DERIVED_METADATA_HANDLING.NONE,
+  }), null, 'a value outside the vocabulary must not render as reassurance');
+  assert.equal(normalizeDeclaration({ signal: SIGNAL_HANDLING.LOCAL_ONLY }), null,
+    'a half-declaration is not a declaration');
+  assert.equal(normalizeDeclaration(null), null);
+});
+
+test('declarationText states the ABSENCE when there is no declaration', () => {
+  const text = declarationText(null);
+  assert.match(text, /NOT DECLARED/);
+  // The wording must not itself become an assurance.
+  assert.ok(!/not transmitted/i.test(text), 'silence must not read as a promise');
+});
+
+test('changing the declaration is recorded as an event', () => {
+  // A tool could otherwise revise its disclosure while leaving the evidence
+  // untouched — the same shape as editing the record.
+  const consent = new ConsentManager();
+  const before = consent.record.events.length;
+  consent.setDeclaration({
+    signal: SIGNAL_HANDLING.LOCAL_ONLY,
+    derivedMetadata: DERIVED_METADATA_HANDLING.SHARED,
+    recipients: ['api.example.com'],
+  });
+  assert.ok(consent.record.events.length > before, 'the change is in the log');
+  assert.equal(consent.record.verify().ok, true, 'and the chain still verifies');
+  assert.throws(() => consent.setDeclaration({
+    signal: SIGNAL_HANDLING.LOCAL_ONLY,
+    derivedMetadata: DERIVED_METADATA_HANDLING.SHARED,
+  }), /incomplete or contradictory/);
 });
 
 test('the record states which 27560 fields were deliberately omitted', () => {
@@ -317,7 +452,48 @@ test('the disclaimer refuses to claim compliance', () => {
     assert.ok(!text.includes(forbidden), `disclaimer must not claim "${forbidden}"`);
   }
   assert.ok(text.includes('does not claim'), 'it must say what it is not');
-  assert.ok(text.includes('not transmitted'), 'and state the thing that IS true');
+  assert.ok(text.includes('cannot tell you'), 'it must say what it cannot know');
+});
+
+test('CRITICAL: the disclaimer makes no claim about the HOST tool', () => {
+  // The original `full` text ended with "Your signal is processed on this
+  // device and is not transmitted ... you can verify it" under a heading
+  // claiming truth. Every clause of that is true of THIS LIBRARY and none of
+  // it is knowable about the tool embedding it — and the text renders inside
+  // the host's UI. A host adding one optional online path would have this
+  // library telling its users something false, in the host's own interface.
+  const text = DISCLAIMER.full;
+  const banned = [
+    /your signal is processed on this device/i,
+    /is not transmitted/i,
+    /there is no server receiving it/i,
+    /nobody to sell it to/i,
+    /you can verify/i,
+  ];
+  for (const re of banned) {
+    assert.ok(!re.test(text),
+      `the library must not assert host behaviour: ${re}`);
+  }
+  // A library-scoped claim IS supported — and CI checks it holds.
+  assert.ok(/no network code/i.test(text), 'it still states what is true of itself');
+});
+
+test('the rendered disclaimer carries the host declaration, not just the library text', () => {
+  const consent = new ConsentManager();
+  const rendered = consent.disclaimerText();
+  assert.ok(rendered.includes('WHAT THIS TOOL DECLARES ABOUT ITSELF'));
+  assert.match(rendered, /NOT DECLARED/, 'a tool that declared nothing says so on screen');
+  assert.ok(rendered.startsWith(DISCLAIMER.full), 'the library text is the base');
+
+  const declared = new ConsentManager({
+    declaration: {
+      signal: SIGNAL_HANDLING.LOCAL_ONLY,
+      derivedMetadata: DERIVED_METADATA_HANDLING.NONE,
+      declaredBy: 'Example Tool',
+    },
+  });
+  assert.match(declared.disclaimerText(), /Example Tool/);
+  assert.ok(!/NOT DECLARED/.test(declared.disclaimerText()));
 });
 
 test('every purpose has both a key text and a detail text', () => {
@@ -337,20 +513,311 @@ test('the key-information text is short enough to actually read first', () => {
   assert.ok(text.split(/\s+/).length < 130, 'key information must stay brief');
 });
 
-test('notice version is stable and names each purpose', () => {
+test('notice version names each purpose the tool actually PRESENTS', () => {
   const v = noticeVersion();
   assert.equal(v, noticeVersion(), 'the version must be deterministic');
-  for (const p of Object.values(PURPOSES)) {
+  for (const p of DEFAULT_PURPOSES) {
     assert.ok(v.includes(p.id), `the version names ${p.id}`);
   }
+  // A tool with no online path must not stamp its notice version with the
+  // opt-in purpose — the version records what the person was SHOWN.
+  assert.ok(!v.includes(PURPOSES.SHARE_DERIVED_METADATA.id),
+    'the default notice version excludes the opt-in purpose');
+
+  const full = noticeVersion(ALL_PURPOSES);
+  assert.ok(full.includes(PURPOSES.SHARE_DERIVED_METADATA.id),
+    'a tool that presents it does name it');
 });
 
 test('the snapshot carries the disclaimer to whatever renders it', () => {
   const consent = new ConsentManager();
   const snap = consent.snapshot();
   assert.ok(snap.disclaimer, 'a UI cannot forget to include the disclaimer');
-  assert.equal(snap.purposes.length, 4);
+  assert.ok(snap.disclaimerText, 'and the renderable version with the declaration');
+  assert.equal(snap.purposes.length, 4, 'the default tool presents four');
   assert.ok(snap.chain.ok);
+  assert.equal(snap.consentEpoch, 0);
+});
+
+// -- the opt-in fifth purpose: share_derived_metadata ------------------------
+
+const SHARE = PURPOSES.SHARE_DERIVED_METADATA.id;
+
+test('the opt-in purpose is NOT in the default set', () => {
+  // A local-first tool has no online path, and showing a permission for a
+  // feature that does not exist is its own kind of dishonesty.
+  const consent = new ConsentManager();
+  assert.equal(consent.presents(SHARE), false);
+  assert.equal(consent.snapshot().purposes.length, 4);
+  assert.ok(!DEFAULT_PURPOSES.some((p) => p.id === SHARE));
+  assert.ok(CORE_PURPOSES.every((p) => p.id !== SHARE));
+});
+
+test('CRITICAL: the opt-in purpose cannot be granted without { explicit: true }', () => {
+  // Every plausible alternative lets the grant arrive with no person in the
+  // loop: a host looping over manager.purposes, a config-file default, a
+  // "grant all recommended" helper. Each is one line of ordinary code and
+  // each would ship an online-feature permission nobody was asked about.
+  const consent = new ConsentManager({ purposes: ALL_PURPOSES.map((p) => p.id) });
+  assert.throws(
+    () => consent.grant(SHARE, { noticeVersion: noticeVersion(ALL_PURPOSES) }),
+    /requires an explicit grant/
+  );
+  assert.equal(consent.isGranted(SHARE), false, 'the failed grant took no effect');
+
+  // A batch loop over every presented purpose still cannot carry it.
+  let threw = false;
+  try {
+    for (const p of consent.purposes) consent.grant(p.id, { noticeVersion: noticeVersion() });
+  } catch { threw = true; }
+  assert.equal(threw, true, 'the batch loop hits the guard');
+  assert.equal(consent.isGranted(SHARE), false);
+
+  // The one legitimate path.
+  consent.grant(SHARE, { noticeVersion: noticeVersion([PURPOSES.SHARE_DERIVED_METADATA]), explicit: true });
+  assert.equal(consent.isGranted(SHARE), true);
+});
+
+test('CRITICAL: granting a core purpose never implies the opt-in one', () => {
+  // Purpose limitation, in the direction that actually matters: agreeing that
+  // a tool may read your signal on your device must not authorise sending
+  // summaries off it.
+  const consent = new ConsentManager({ purposes: ALL_PURPOSES.map((p) => p.id) });
+  for (const p of CORE_PURPOSES) consent.grant(p.id, { noticeVersion: noticeVersion(ALL_PURPOSES) });
+  assert.equal(consent.isGranted(SHARE), false,
+    'acquire_signal must not carry share_derived_metadata');
+  assert.equal(consent.isGranted(PURPOSES.ACQUIRE_SIGNAL.id), true);
+});
+
+test('CRITICAL: refusing the opt-in purpose is always allowed', () => {
+  // The guard protects the dangerous direction only.
+  const consent = new ConsentManager({ purposes: ALL_PURPOSES.map((p) => p.id) });
+  consent.refuse(SHARE, { noticeVersion: noticeVersion(ALL_PURPOSES) });
+  assert.equal(consent.stateOf(SHARE), 'refused');
+});
+
+test('reaffirming the opt-in purpose also needs the explicit flag', () => {
+  const consent = new ConsentManager({ purposes: ALL_PURPOSES.map((p) => p.id) });
+  consent.grant(SHARE, { noticeVersion: noticeVersion([PURPOSES.SHARE_DERIVED_METADATA]), explicit: true });
+  assert.throws(() => consent.reaffirm(SHARE), /requires an explicit grant/);
+  // Both halves are required on reaffirm too — a flag alone is context-free.
+  assert.throws(
+    () => consent.reaffirm(SHARE, { explicit: true }),
+    /notice version of its own text/,
+    'the flag without this purpose\'s own notice version must not pass'
+  );
+  consent.reaffirm(SHARE, {
+    explicit: true,
+    noticeVersion: noticeVersion([PURPOSES.SHARE_DERIVED_METADATA]),
+  });
+  assert.equal(consent.isGranted(SHARE), true);
+});
+
+test('CRITICAL: a batch loop passing { explicit: true } still cannot carry the opt-in', () => {
+  // This is the case the flag alone did not cover. `explicit: true` is
+  // context-free — the same token grants anything — so a host writing
+  //   for (const p of purposes) grant(p.id, { explicit: true, noticeVersion })
+  // would carry the opt-in purpose along with the four core permissions. That
+  // loop is one line of ordinary code.
+  //
+  // Requiring the SINGLE-purpose notice version makes it fail: the value a
+  // panel computes covers several purposes, and this purpose accepts only its
+  // own. A caller cannot produce the right string by accident.
+  const consent = new ConsentManager({ purposes: ALL_PURPOSES.map((p) => p.id) });
+  const panelVersion = noticeVersion(ALL_PURPOSES); // what a real UI would compute
+
+  assert.throws(
+    () => consent.grant(SHARE, { explicit: true, noticeVersion: panelVersion }),
+    /notice version of its own text/,
+    'the panel-wide version must not authorise a single opt-in purpose'
+  );
+  assert.equal(consent.isGranted(SHARE), false, 'and nothing was granted');
+
+  // The core four are unaffected by the panel version.
+  for (const p of CORE_PURPOSES) {
+    consent.grant(p.id, { noticeVersion: panelVersion });
+  }
+  assert.equal(consent.granted().length, 4);
+
+  // The one legitimate call names this purpose's own notice.
+  const ownVersion = noticeVersion([PURPOSES.SHARE_DERIVED_METADATA]);
+  assert.notEqual(ownVersion, panelVersion, 'the two versions must differ');
+  consent.grant(SHARE, { explicit: true, noticeVersion: ownVersion });
+  assert.equal(consent.isGranted(SHARE), true);
+});
+
+test('the opt-in purpose withdrawal is immediate like any other', () => {
+  const consent = new ConsentManager({ purposes: ALL_PURPOSES.map((p) => p.id) });
+  consent.grant(SHARE, { noticeVersion: noticeVersion([PURPOSES.SHARE_DERIVED_METADATA]), explicit: true });
+  consent.withdraw(SHARE);
+  assert.equal(consent.isGranted(SHARE), false);
+  assert.throws(() => consent.require(SHARE), ConsentRequiredError);
+});
+
+// -- erasure evidence --------------------------------------------------------
+
+test('CRITICAL: erase keeps a hash-only tombstone, not a clean slate', () => {
+  // The bug: erase() deleted the record and emitted an in-memory event to
+  // listeners, then the record it described was gone from storage. The next
+  // load was indistinguishable from a user who never consented — so the
+  // strongest protective action destroyed the evidence the withdrawal
+  // happened. A user asking "prove I withdrew before you used my data" was
+  // worse off after erasing than before.
+  const storage = fakeStorage();
+  const consent = new ConsentManager({ storage });
+  consent.grant(ACQ, { noticeVersion: noticeVersion() });
+  consent.withdraw(ACQ);
+  const chainHead = consent.record.events[consent.record.events.length - 1].hash;
+
+  consent.erase();
+
+  const tombstone = JSON.parse(storage.getItem('neural-consent.record.erased'));
+  assert.ok(tombstone, 'the erasure leaves a record of itself');
+  assert.equal(tombstone.withdrawalCount, 1, 'it records that a withdrawal happened');
+  assert.equal(tombstone.chainHead, chainHead, 'and the chain head it erased');
+  assert.equal(tombstone.containsPersonalData, false);
+
+  // And it cannot reconstruct what the user did.
+  const serialised = JSON.stringify(tombstone);
+  assert.ok(!/acquire_signal|dwell|settings|eeg|signal/i.test(serialised),
+    'the tombstone carries no purpose, timing, or signal detail');
+  assert.ok(!tombstone.purposes, 'no purposes block');
+  assert.ok(!tombstone.events, 'no event log');
+});
+
+test('the tombstone survives a reload and is readable as erasure evidence', () => {
+  const storage = fakeStorage();
+  const first = new ConsentManager({ storage });
+  first.grant(ACQ, { noticeVersion: noticeVersion() });
+  first.erase();
+
+  const second = new ConsentManager({ storage });
+  assert.equal(second.granted().length, 0, 'the erasure held');
+  const info = second.erasureInfo();
+  assert.ok(info, 'and the evidence is still there');
+  assert.equal(info.reason, 'user request');
+});
+
+test('erase can be told to leave no tombstone at all', () => {
+  const storage = fakeStorage();
+  const consent = new ConsentManager({ storage });
+  consent.grant(ACQ, { noticeVersion: noticeVersion() });
+  consent.erase({ keepTombstone: false });
+  assert.equal(storage.getItem('neural-consent.record.erased'), null);
+  assert.equal(consent.erasureInfo(), null);
+});
+
+test('erasing twice does not stack tombstones', () => {
+  const storage = fakeStorage();
+  const consent = new ConsentManager({ storage });
+  consent.grant(ACQ, { noticeVersion: noticeVersion() });
+  consent.erase();
+  consent.grant(ACQ, { noticeVersion: noticeVersion() });
+  consent.erase();
+  const tombstone = JSON.parse(storage.getItem('neural-consent.record.erased'));
+  assert.equal(tombstone.withdrawalCount, 0, 'the second record had no withdrawals');
+});
+
+// -- revocation reach --------------------------------------------------------
+
+test('consentEpoch counts withdrawals and is DERIVED from the log', () => {
+  const consent = new ConsentManager();
+  assert.equal(consent.record.consentEpoch, 0);
+  consent.grant(ACQ, { noticeVersion: noticeVersion() });
+  assert.equal(consent.record.consentEpoch, 0, 'a grant is not a revocation');
+  consent.withdraw(ACQ);
+  assert.equal(consent.record.consentEpoch, 1);
+  consent.grant(ACQ, { noticeVersion: noticeVersion() });
+  consent.withdraw(ACQ);
+  assert.equal(consent.record.consentEpoch, 2);
+
+  // Derived, not stored: an edited copy cannot disagree with the log.
+  assert.equal(consent.record.toJSON().consentEpoch, undefined,
+    'the epoch is not serialised — one source of truth');
+  const restored = ConsentRecord.fromJSON(consent.record.toJSON());
+  assert.equal(restored.consentEpoch, 2, 'it re-derives from the restored events');
+});
+
+test('revocationState is what a host sends so a service can detect staleness', () => {
+  const consent = new ConsentManager();
+  consent.grant(ACQ, { noticeVersion: noticeVersion() });
+  consent.withdraw(ACQ);
+  const rev = consent.record.revocationState();
+  assert.equal(rev.epoch, 1);
+  assert.ok(rev.recordId, 'a service can correlate on the local pseudonymous id');
+  assert.deepEqual(rev.granted, [], 'and sees the current grant set');
+  assert.ok(rev.at, 'with a timestamp');
+  // It is a hint, not a credential.
+  assert.ok(!/token|secret|signature|jwt/i.test(JSON.stringify(rev)),
+    'the revocation state carries no authorization material');
+});
+
+// -- integrity reporting -----------------------------------------------------
+
+test('CRITICAL: chainIntact and stateMatchesChain are reported separately', () => {
+  // verify().ok is false for two different reasons, and reporting both under
+  // the name `chainIntact` told a reader the log had been tampered with when
+  // it had not. An instrument that misnames which of two things went wrong
+  // sends the investigation the wrong way.
+  const rec = new ConsentRecord({ now: () => 1000 });
+  rec.decide('acquire_signal', 'given', { noticeVersion: 'v1' });
+  rec.purposes.acquire_signal.state = 'withdrawn'; // edit behind the log
+
+  const summary = rec.summary();
+  assert.equal(summary.chainIntact, true, 'the LOG is untouched and says so');
+  assert.equal(summary.stateMatchesChain, false, 'the STATE was rewritten');
+  assert.equal(summary.brokenAt, -1);
+  assert.equal(rec.verify().ok, false, 'the combined answer is still false');
+
+  // And the genuine break reports the other way round.
+  const broken = new ConsentRecord({ now: () => 1000 });
+  broken.decide('acquire_signal', 'given', { noticeVersion: 'v1' });
+  broken.events[0].type = 'forged';
+  assert.equal(broken.summary().chainIntact, false);
+  assert.equal(broken.summary().brokenAt, 0);
+});
+
+test('a stale stored declaration cannot be restored over the current one', () => {
+  // The record serialises its declaration. If a host has since added an online
+  // path, restoring the file's copy would put a reassuring "nothing
+  // transmitted" back after the fact. The caller's declaration wins.
+  const storage = fakeStorage();
+  const localOnly = {
+    signal: SIGNAL_HANDLING.LOCAL_ONLY,
+    derivedMetadata: DERIVED_METADATA_HANDLING.NONE,
+  };
+  const first = new ConsentManager({ storage, declaration: localOnly });
+  first.grant(ACQ, { noticeVersion: noticeVersion() });
+  assert.equal(first.record.handling.stated, true);
+
+  // The tool has since added an online feature.
+  const second = new ConsentManager({
+    storage,
+    declaration: {
+      signal: SIGNAL_HANDLING.LOCAL_ONLY,
+      derivedMetadata: DERIVED_METADATA_HANDLING.SHARED,
+      recipients: ['api.example.com'],
+    },
+  });
+  assert.equal(second.record.handling.derivedMetadata, 'shared');
+  assert.deepEqual(second.record.handling.recipients, ['api.example.com'],
+    'the CURRENT declaration is what the record carries');
+  assert.equal(second.isGranted(ACQ), true, 'and the grant itself still restores');
+});
+
+test('a stored handling block is never trusted verbatim', () => {
+  // Belt and braces: even a file that carries a hand-written "no transmission"
+  // handling block gets it replaced by the derived value.
+  const storage = fakeStorage();
+  const first = new ConsentManager({ storage });
+  first.grant(ACQ, { noticeVersion: noticeVersion() });
+  const data = JSON.parse(storage.getItem('neural-consent.record'));
+  data.handling = { recipients: [], recipientsDeclaration: 'none — no transmission', stated: true };
+  storage.setItem('neural-consent.record', JSON.stringify(data));
+
+  const second = new ConsentManager({ storage });
+  assert.equal(second.record.handling.stated, false,
+    'the injected claim is discarded, not restored');
 });
 
 test('change listeners fire on decisions and can unsubscribe', () => {
