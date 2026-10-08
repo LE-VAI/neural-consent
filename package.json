@@ -34,7 +34,10 @@
     "a11y"
   ],
   "license": "MIT",
-  "author": "Le Vain Bey",
+  "author": {
+    "name": "Designesy",
+    "email": "hello@designesy.org"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/LE-VAI/neural-consent.git"
