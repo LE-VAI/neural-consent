@@ -4,7 +4,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-reduced-motion: reduce)" srcset="docs/media/hero-poster.png">
-    <img src="docs/media/hero-loop.webp" width="800" alt="A four-event consent log. Each row's prev value equals the hash of the row above it, joined by a teal link. A teal dot travels each link from top to bottom, lighting each matched row and its prev value in turn, ending at a red withdraw of acquire_signal. The gate panel shows isGranted false for acquire_signal and true for process_locally and persist_locally, and verify() lights up with ok: true, brokenAt: -1.">
+    <img src="docs/media/hero-loop.webp" width="800" alt="A four-event consent log. Each row's prev value equals the hash of the row above it, joined by a link. A yellow dot travels each link from top to bottom, lighting each matched row and its prev value in turn, ending at a struck-through withdraw of acquire_signal. The gate panel shows isGranted false for acquire_signal and true for process_locally and persist_locally, and verify() lights up with ok: true, brokenAt: -1.">
   </picture>
 </p>
 <p align="center"><sub>A 5-second loop. It plays once and rests, and shows a still frame if you prefer reduced motion. <a href="https://le-vai.github.io/LE-VAI/loops/#neural-consent">Watch it on repeat</a>.</sub></p>
